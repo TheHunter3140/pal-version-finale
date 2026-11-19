@@ -47,14 +47,6 @@ struct SettingsTab: View {
                         Label("Données et confidentialité", systemImage: "lock")
                     }
                 }
-                Section("À propos") {
-                    HStack {
-                        Text("Version")
-                        Spacer()
-                        Text("\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—") · build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—")")
-                            .foregroundStyle(.secondary)
-                    }
-                }
             }
             .navigationTitle("Réglages")
             .sheet(isPresented: $showSkills) { SkillsView() }
@@ -72,12 +64,8 @@ struct SettingsDetail: View {
     @Environment(\.dismiss) private var dismiss
     @State private var voices: [AVSpeechSynthesisVoice] = []
 
-    private let presets: [(String, String)] = [
-        ("Concis", "Tu es un assistant concis et précis. Réponds dans la langue de l'utilisateur."),
-        ("Maths", "Tu es un tuteur de mathématiques rigoureux. Donne la formule exacte puis le raisonnement étape par étape, sans inventer."),
-        ("Traducteur", "Tu es un traducteur FR↔EN. Traduis fidèlement, sans commentaire."),
-        ("Code", "Tu es un expert Python, HTML, CSS et JavaScript. Donne du code correct, commenté et court.")
-    ]
+    // Même source que les personnages : plus de textes divergents entre Réglages et Personnages.
+    private let presets: [(String, String)] = Persona.defaults.map { ($0.name, $0.prompt) }
 
     var body: some View {
         Form { content }
@@ -245,14 +233,12 @@ struct SettingsDetail: View {
                 .foregroundStyle(.secondary)
 
             HStack { Toggle(isOn: gpuBinding) { Label("GPU Metal", systemImage: "cpu") }; resetButton { vm.cfg.gpuLayers = Cfg().gpuLayers } }
-            HStack { Toggle("Lecture mmap", isOn: $vm.prefs.mmap); resetButton { vm.prefs.mmap = true } }
+            Label("Lecture mmap : toujours active (non configurable avec ce moteur)", systemImage: "externaldrive")
+                .font(.caption).foregroundStyle(.secondary)
             HStack { Toggle("Protection thermique et batterie", isOn: $vm.prefs.thermalGuard); resetButton { vm.prefs.thermalGuard = true } }
-            HStack { Stepper(value: $vm.cfg.nCtx, in: 256...65536, step: 256) { Label("Contexte : \(vm.cfg.nCtx) tokens", systemImage: "text.alignleft") }; resetButton { vm.cfg.nCtx = Cfg().nCtx } }
+            HStack { Stepper(value: $vm.cfg.nCtx, in: 256...Cfg.maxContext, step: 256) { Label("Contexte : \(vm.cfg.nCtx) tokens", systemImage: "text.alignleft") }; resetButton { vm.cfg.nCtx = Cfg().nCtx } }
             HStack { Stepper(value: $vm.cfg.nBatch, in: 32...2048, step: 32) { Label("Batch : \(vm.cfg.nBatch)", systemImage: "square.stack.3d.up") }; resetButton { vm.cfg.nBatch = Cfg().nBatch } }
             HStack { Stepper(value: $vm.cfg.threads, in: 1...8) { Label("Threads : \(vm.cfg.threads)", systemImage: "square.grid.3x3") }; resetButton { vm.cfg.threads = Cfg().threads } }
-            HStack { Stepper(value: $vm.cfg.batchThreads, in: 1...8) { Label("Threads préremplissage : \(vm.cfg.batchThreads)", systemImage: "square.stack.3d.up") }; resetButton { vm.cfg.batchThreads = Cfg().batchThreads } }
-            Text("Les threads de génération et de préremplissage sont appliqués séparément par llama.cpp. La garde réduit ces valeurs uniquement si l'état thermique iOS est sérieux/critique ou si le mode économie d'énergie est actif.")
-                .font(.caption).foregroundStyle(.secondary)
             HStack { Stepper(value: $vm.cfg.maxTokens, in: 64...2048, step: 64) { Label("Réponse max : \(vm.cfg.maxTokens) tokens", systemImage: "text.badge.checkmark") }; resetButton { vm.cfg.maxTokens = Cfg().maxTokens } }
             HStack { Stepper(value: $vm.cfg.nUBatch, in: 32...1024, step: 32) { Label("Micro-batch : \(vm.cfg.nUBatch)", systemImage: "square.stack") }; resetButton { vm.cfg.nUBatch = Cfg().nUBatch } }
             HStack {

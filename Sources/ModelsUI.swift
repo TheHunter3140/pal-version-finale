@@ -56,7 +56,9 @@ struct ModelsTab: View {
             .fileImporter(isPresented: $picking, allowedContentTypes: [.data]) { result in
                 switch result {
                 case .failure(let error):
-                    message = "Sélection impossible : \(error.localizedDescription)"
+                    if (error as? CocoaError)?.code != .userCancelled {
+                        message = "Sélection impossible : \(error.localizedDescription)"
+                    }
                 case .success(let url):
                     switch target {
                     case .model:
@@ -85,7 +87,7 @@ struct ModelsTab: View {
                         let source = pendingCopyURL
                         DispatchQueue.main.async {
                             if let source {
-                                message = vm.importModelCopy(source) ? "Modèle copié dans Pal." : vm.status
+                                message = vm.importModelCopy(source) ? "Copie lancée : le modèle apparaît dans la liste à la fin." : vm.status
                             }
                         }
                     }

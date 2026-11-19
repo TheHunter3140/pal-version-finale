@@ -6,11 +6,7 @@ on:
       version:
         description: "Version de l'app (ex : 1.0.0, chiffres et points uniquement)"
         required: true
-        default: "1.4.2"
-      build_number:
-        description: "Numéro de build (valeur de base : 11)"
-        required: true
-        default: "11"
+        default: "1.4.3"
       publish_release:
         description: "Publier une release GitHub avec l'IPA"
         type: boolean
@@ -48,43 +44,31 @@ jobs:
       - name: Déterminer la version
         env:
           INPUT_VERSION: ${{ inputs.version }}
-          INPUT_BUILD_NUMBER: ${{ inputs.build_number }}
         run: |
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
-            BUILD_NUMBER="$GITHUB_RUN_NUMBER"
           else
             VERSION="$INPUT_VERSION"
-            BUILD_NUMBER="$INPUT_BUILD_NUMBER"
           fi
           if ! echo "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){0,2}$'; then
             echo "Version invalide : '$VERSION' (attendu : 1, 1.0 ou 1.0.0)"
             exit 1
           fi
-          if ! echo "$BUILD_NUMBER" | grep -Eq '^[1-9][0-9]*$'; then
-            echo "Numéro de build invalide : '$BUILD_NUMBER'"
-            exit 1
-          fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
-          echo "Version : $VERSION (build $BUILD_NUMBER)"
+          echo "Version : $VERSION (build ${{ github.run_number }})"
 
       - name: Récupérer llama.xcframework (release ${{ env.DEPS_TAG }})
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ ! -d llama.xcframework ]; then
-            gh release download "$DEPS_TAG" \
-              --repo "${{ github.repository }}" \
-              --pattern "$LLAMA_ZIP" \
-              --dir deps
-            unzip -q "deps/$LLAMA_ZIP" -d deps/unzipped
-            FW=$(find deps/unzipped -name llama.xcframework -type d -print -quit)
-            test -n "$FW" || { echo "llama.xcframework introuvable dans le zip"; exit 1; }
-            mv "$FW" ./llama.xcframework
-          else
-            echo "Utilisation du llama.xcframework fourni avec le projet."
-          fi
+          gh release download "$DEPS_TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern "$LLAMA_ZIP" \
+            --dir deps
+          unzip -q "deps/$LLAMA_ZIP" -d deps/unzipped
+          FW=$(find deps/unzipped -name llama.xcframework -type d | head -n 1)
+          test -n "$FW" || { echo "llama.xcframework introuvable dans le zip"; exit 1; }
+          mv "$FW" ./llama.xcframework
           ls -la llama.xcframework
 
       - name: Valider llama.cpp, MTMD, ARM64 et Metal
@@ -109,7 +93,7 @@ jobs:
       - name: Injecter la version dans project.yml
         run: |
           sed -i '' -E "s/CFBundleShortVersionString: .*/CFBundleShortVersionString: \"$VERSION\"/" project.yml
-          sed -i '' -E "s/CFBundleVersion: .*/CFBundleVersion: \"$BUILD_NUMBER\"/" project.yml
+          sed -i '' -E "s/CFBundleVersion: .*/CFBundleVersion: \"${{ github.run_number }}\"/" project.yml
           grep -n "CFBundle" project.yml
 
       - name: Installer XcodeGen
@@ -140,12 +124,7 @@ jobs:
         if: failure()
         run: |
           echo "=== ERREURS ==="
-          if grep -n -E "error:|ld: |Undefined symbol" build.log > errors.raw; then
-            sort -u errors.raw > errors.txt
-          else
-            : > errors.txt
-          fi
-          sed -n '1,40p' errors.txt
+          grep -n -E "error:|ld: |Undefined symbol" build.log | sort -u | head -n 40 | tee errors.txt
           {
             echo "## Échec de la compilation"
             echo '```'
@@ -170,7 +149,7 @@ jobs:
           SIZE=$(du -h "Pal-$VERSION.ipa" | cut -f1)
           SHA=$(cut -d' ' -f1 "Pal-$VERSION.ipa.sha256")
           {
-            echo "## Pal $VERSION (build $BUILD_NUMBER)"
+            echo "## Pal $VERSION (build ${{ github.run_number }})"
             echo ""
             echo "| | |"
             echo "|---|---|"
@@ -223,7 +202,7 @@ jobs:
             echo "$SHA"
             echo '```'
             echo ""
-            echo "Build $BUILD_NUMBER, commit \`${GITHUB_SHA::7}\`, moteur \`$LLAMA_ZIP\`."
+            echo "Build ${{ github.run_number }}, commit \`${GITHUB_SHA::7}\`, moteur \`$LLAMA_ZIP\`."
           } > notes.md
           if [ -n "$INPUT_NOTES" ]; then
             { echo ""; echo "## Notes"; printf '%s\n' "$INPUT_NOTES"; } >> notes.md

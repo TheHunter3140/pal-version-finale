@@ -55,6 +55,43 @@ enum MDBlock {
     case rule
 }
 
+/// Boîte de cache (NSCache exige des objets de classe).
+final class MDBox<T> {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
+
+/// Évite de ré-analyser le Markdown de chaque message à chaque rafraîchissement de l'écran
+/// (jusqu'à une douzaine de fois par seconde pendant une génération).
+enum MDCache {
+    private static let blockCache: NSCache<NSString, MDBox<[MDBlock]>> = {
+        let c = NSCache<NSString, MDBox<[MDBlock]>>()
+        c.countLimit = 80
+        return c
+    }()
+    private static let inlineCache: NSCache<NSString, MDBox<AttributedString>> = {
+        let c = NSCache<NSString, MDBox<AttributedString>>()
+        c.countLimit = 600
+        return c
+    }()
+
+    static func blocks(_ source: String) -> [MDBlock] {
+        let key = source as NSString
+        if let hit = blockCache.object(forKey: key) { return hit.value }
+        let parsed = MD.blocks(source)
+        blockCache.setObject(MDBox(parsed), forKey: key)
+        return parsed
+    }
+
+    static func attributed(_ source: String) -> AttributedString {
+        let key = source as NSString
+        if let hit = inlineCache.object(forKey: key) { return hit.value }
+        let parsed = MD.attributed(source)
+        inlineCache.setObject(MDBox(parsed), forKey: key)
+        return parsed
+    }
+}
+
 enum MD {
     enum Seg {
         case text(String)
@@ -358,7 +395,7 @@ enum MD {
         for seg in segments(s) {
             switch seg {
             case .text(let t):
-                result = result + Text(attributed(t))
+                result = result + Text(MDCache.attributed(t))
             case .math(let tex):
                 result = result + mathText(tex, size: size, dark: dark)
             }
@@ -371,7 +408,11 @@ enum MD {
 
 #if canImport(SwiftMath)
 enum MathCache {
-    private static let cache = NSCache<NSString, UIImage>()
+    private static let cache: NSCache<NSString, UIImage> = {
+        let c = NSCache<NSString, UIImage>()
+        c.countLimit = 300
+        return c
+    }()
 
     static func image(_ tex: String, size: CGFloat, dark: Bool, display: Bool) -> UIImage? {
         let key = "\(display)|\(Int(size))|\(dark)|\(tex)" as NSString
@@ -629,7 +670,7 @@ struct RichText: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(MD.blocks(text).enumerated()), id: \.offset) { _, block in
+            ForEach(Array(MDCache.blocks(text).enumerated()), id: \.offset) { _, block in
                 BlockView(
                     block: block,
                     size: vm.cfg.fontSize,
@@ -695,15 +736,12 @@ struct MessageView: View {
     @EnvironmentObject private var vm: VM
     @EnvironmentObject private var speaker: Speaker
 
-    private var parts: ThinkSplit.Parts {
-        ThinkSplit.parse(message.text, modelThinks: vm.modelThinks, streaming: streaming)
-    }
-
     var body: some View {
         if message.role == "user" {
             userBubble
         } else {
-            assistantView
+            // Découpage réflexion / réponse : une seule analyse par rafraîchissement (elle était refaite ~8 fois).
+            assistantView(ThinkSplit.parse(message.text, modelThinks: vm.modelThinks, streaming: streaming))
         }
     }
 
@@ -726,7 +764,7 @@ struct MessageView: View {
         }
     }
 
-    private var assistantView: some View {
+    private func assistantView(_ parts: ThinkSplit.Parts) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if let think = parts.think, vm.prefs.thinkDisplay != 2 || parts.thinkingOpen {
                 ThinkBlock(text: think, seconds: message.thinkSeconds, open: parts.thinkingOpen)
@@ -745,7 +783,7 @@ struct MessageView: View {
                 Text("…").foregroundStyle(.secondary)
             }
             if !streaming && !parts.answer.isEmpty {
-                footer
+                footer(parts)
             }
         }
         .padding(vm.prefs.bubbleMode == 0 ? 0 : 12)
@@ -763,17 +801,17 @@ struct MessageView: View {
         }
     }
 
-    private var isSpeaking: Bool { speaker.speakingText == parts.answer }
+    private func isSpeaking(_ parts: ThinkSplit.Parts) -> Bool { speaker.speakingText == parts.answer }
 
-    private func toggleSpeech() {
-        if isSpeaking {
+    private func toggleSpeech(_ parts: ThinkSplit.Parts) {
+        if isSpeaking(parts) {
             speaker.stop()
         } else {
             speaker.speak(parts.answer, voiceID: vm.prefs.ttsVoice, rate: vm.prefs.ttsRate)
         }
     }
 
-    private var footer: some View {
+    private func footer(_ parts: ThinkSplit.Parts) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 18) {
                 Button { UIPasteboard.general.string = parts.answer } label: {
@@ -789,10 +827,10 @@ struct MessageView: View {
                     Button { vm.continueGeneration() } label: { Label("Continuer", systemImage: "arrow.down.to.line") }
                         .disabled(vm.generating || vm.loading)
                 }
-                Button { toggleSpeech() } label: {
-                    Image(systemName: isSpeaking ? "stop.circle" : "speaker.wave.2")
+                Button { toggleSpeech(parts) } label: {
+                    Image(systemName: isSpeaking(parts) ? "stop.circle" : "speaker.wave.2")
                 }
-                .accessibilityLabel(isSpeaking ? "Arrêter la lecture" : "Lire à voix haute")
+                .accessibilityLabel(isSpeaking(parts) ? "Arrêter la lecture" : "Lire à voix haute")
             }
             .font(.system(size: 16))
             .foregroundStyle(.secondary)

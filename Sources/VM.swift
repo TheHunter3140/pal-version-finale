@@ -59,16 +59,16 @@ enum PerfProfile: String, CaseIterable, Identifiable {
         let cores = ProcessInfo.processInfo.activeProcessorCount
         switch self {
         case .eco:
-            cfg.nCtx = 1024; cfg.nBatch = 128; cfg.nUBatch = 128; cfg.threads = min(2, cores); cfg.batchThreads = min(2, cores)
+            cfg.nCtx = 1024; cfg.nBatch = 128; cfg.nUBatch = 128; cfg.threads = min(2, cores)
             cfg.gpuLayers = 0; cfg.maxTokens = 256; cfg.flashAttn = 0; cfg.kvQuant = 1
         case .balanced:
-            cfg.nCtx = 2048; cfg.nBatch = 512; cfg.nUBatch = 512; cfg.threads = Sys.defaultThreads; cfg.batchThreads = Sys.defaultThreads
+            cfg.nCtx = 2048; cfg.nBatch = 512; cfg.nUBatch = 512; cfg.threads = Sys.defaultThreads
             cfg.gpuLayers = Sys.gpuCapable ? 99 : 0; cfg.maxTokens = 512; cfg.flashAttn = 0; cfg.kvQuant = 0
         case .performance:
-            cfg.nCtx = 4096; cfg.nBatch = 512; cfg.nUBatch = 512; cfg.threads = Sys.defaultThreads; cfg.batchThreads = Sys.defaultThreads
+            cfg.nCtx = 4096; cfg.nBatch = 512; cfg.nUBatch = 512; cfg.threads = Sys.defaultThreads
             cfg.gpuLayers = Sys.gpuCapable ? 99 : 0; cfg.maxTokens = 1024; cfg.flashAttn = 0; cfg.kvQuant = 0
         case .ultra:
-            cfg.nCtx = 8192; cfg.nBatch = 1024; cfg.nUBatch = 512; cfg.threads = max(2, cores); cfg.batchThreads = max(2, cores)
+            cfg.nCtx = 8192; cfg.nBatch = 1024; cfg.nUBatch = 512; cfg.threads = max(2, cores)
             cfg.gpuLayers = Sys.gpuCapable ? 99 : 0; cfg.maxTokens = 2048; cfg.flashAttn = 0; cfg.kvQuant = 1
         case .custom:
             break
@@ -78,11 +78,11 @@ enum PerfProfile: String, CaseIterable, Identifiable {
     /// Réglages Max/Ultra de la version 1.1.0 (GPU forcé) : migrés vers ceux de la version 1.2.
     static func v110Match(_ c: Cfg) -> PerfProfile? {
         let cores = ProcessInfo.processInfo.activeProcessorCount
-        if c.nCtx == 4096 && c.nBatch == 512 && c.nUBatch == 512 && c.threads == Sys.defaultThreads && c.batchThreads == Sys.defaultThreads
+        if c.nCtx == 4096 && c.nBatch == 512 && c.nUBatch == 512 && c.threads == Sys.defaultThreads
             && c.gpuLayers == 99 && c.maxTokens == 1024 && c.flashAttn == 0 && c.kvQuant == 1 {
             return .performance
         }
-        if c.nCtx == 8192 && c.nBatch == 1024 && c.nUBatch == 512 && c.threads == max(2, cores) && c.batchThreads == max(2, cores)
+        if c.nCtx == 8192 && c.nBatch == 1024 && c.nUBatch == 512 && c.threads == max(2, cores)
             && c.gpuLayers == 99 && c.maxTokens == 2048 && c.flashAttn == 0 && c.kvQuant == 1 {
             return .ultra
         }
@@ -110,7 +110,6 @@ enum PerfProfile: String, CaseIterable, Identifiable {
             var probe = cfg
             profile.apply(&probe)
             if probe.nCtx == cfg.nCtx && probe.nBatch == cfg.nBatch && probe.threads == cfg.threads
-                && probe.batchThreads == cfg.batchThreads
                 && probe.gpuLayers == cfg.gpuLayers && probe.maxTokens == cfg.maxTokens
                 && probe.nUBatch == cfg.nUBatch && probe.flashAttn == cfg.flashAttn && probe.kvQuant == cfg.kvQuant {
                 return profile
@@ -122,17 +121,19 @@ enum PerfProfile: String, CaseIterable, Identifiable {
 
 struct Cfg: Codable {
     var temp = 0.7, topP = 0.9, minP = 0.05, repeatPen = 1.1
-    var topK = 40, nCtx = 2048, nBatch = 512, nUBatch = 512, threads = Sys.defaultThreads, batchThreads = Sys.defaultThreads
+    var topK = 40, nCtx = 2048, nBatch = 512, nUBatch = 512, threads = Sys.defaultThreads
     var gpuLayers = Sys.gpuCapable ? 99 : 0, maxTokens = 512
     var flashAttn = 0          // 0 auto, 1 activée, 2 désactivée
     var kvQuant = 0            // 0 précis (f16), 1 compact (q8_0)
+    /// Plafond de contexte : au-delà, le cache K/V dépasse la RAM d'un iPhone et iOS ferme l'app.
+    static let maxContext = 16384
     static let legacyDefaultSystem = "Tu es un assistant concis et précis. Réponds dans la langue de l'utilisateur."
     var system = ""            // vide par défaut
     var theme = 0, fontSize = 12.0, accR = 0.004, accG = 0.78, accB = 0.99
     var haptics = true, keepAwake = true
 
     enum CodingKeys: String, CodingKey {
-        case temp, topP, minP, repeatPen, topK, nCtx, nBatch, nUBatch, threads, batchThreads, gpuLayers, maxTokens
+        case temp, topP, minP, repeatPen, topK, nCtx, nBatch, nUBatch, threads, gpuLayers, maxTokens
         case flashAttn, kvQuant, system, theme, fontSize, accR, accG, accB, haptics, keepAwake
     }
 
@@ -147,11 +148,11 @@ struct Cfg: Codable {
         minP = try c.decodeIfPresent(Double.self, forKey: .minP) ?? d.minP
         repeatPen = try c.decodeIfPresent(Double.self, forKey: .repeatPen) ?? d.repeatPen
         topK = try c.decodeIfPresent(Int.self, forKey: .topK) ?? d.topK
-        nCtx = try c.decodeIfPresent(Int.self, forKey: .nCtx) ?? d.nCtx
+        let rawContext = try c.decodeIfPresent(Int.self, forKey: .nCtx) ?? d.nCtx
+        nCtx = min(max(256, rawContext), Cfg.maxContext)
         nBatch = try c.decodeIfPresent(Int.self, forKey: .nBatch) ?? d.nBatch
         nUBatch = try c.decodeIfPresent(Int.self, forKey: .nUBatch) ?? d.nUBatch
         threads = try c.decodeIfPresent(Int.self, forKey: .threads) ?? d.threads
-        batchThreads = try c.decodeIfPresent(Int.self, forKey: .batchThreads) ?? threads
         gpuLayers = try c.decodeIfPresent(Int.self, forKey: .gpuLayers) ?? d.gpuLayers
         maxTokens = try c.decodeIfPresent(Int.self, forKey: .maxTokens) ?? d.maxTokens
         flashAttn = try c.decodeIfPresent(Int.self, forKey: .flashAttn) ?? d.flashAttn
@@ -176,8 +177,7 @@ struct Cfg: Codable {
 }
 
 enum Sys {
-    /// Hypothèse de départ conservatrice (4 sur un appareil à 6 cœurs logiques).
-    /// Ce choix n'est pas présenté comme optimal : il doit être comparé au benchmark sur XR.
+    /// Threads par défaut : assez pour le prefill sans surchauffer.
     static var defaultThreads: Int { max(2, min(4, ProcessInfo.processInfo.activeProcessorCount - 2)) }
 
     /// GPU Metal utilisable : appareil réel, iOS 18+ et GPU famille Apple7 (A14 ou plus récent).
@@ -252,6 +252,9 @@ enum Sys {
     private var lastLoadPath = ""
     private var loadedSignature = ""
     private var idleTask: Task<Void, Never>?
+    private let saveQueue = DispatchQueue(label: "com.local.pal.save", qos: .utility)
+    private var copyingModel = false
+    private var backgroundTask = UIBackgroundTaskIdentifier.invalid
     var generating: Bool { streaming != nil }
     private var scoped: URL?
     let UD = UserDefaults.standard
@@ -279,13 +282,28 @@ enum Sys {
         }
         UD.set(3, forKey: "perfVersion")
         if let d = UD.data(forKey: "models"), let m = try? JSONDecoder().decode([ModelEntry].self, from: d) { models = m }
-        if let d = UD.data(forKey: "skills"), let saved = try? JSONDecoder().decode([PalSkill].self, from: d) { skills = saved }
-        if let d = UD.data(forKey: "personas"), let saved = try? JSONDecoder().decode([Persona].self, from: d), !saved.isEmpty { personas = saved }
+        if let d = UD.data(forKey: "skills"), let saved = try? JSONDecoder().decode([PalSkill].self, from: d) {
+            // Les compétences intégrées ajoutées par une mise à jour apparaissent sans effacer les choix de l'utilisateur.
+            let known = Set(saved.map(\.id))
+            skills = saved + PalSkill.defaults.filter { !known.contains($0.id) }
+        }
+        if let d = UD.data(forKey: "personas"), let saved = try? JSONDecoder().decode([Persona].self, from: d), !saved.isEmpty {
+            let known = Set(saved.map(\.id))
+            personas = saved + Persona.defaults.filter { !known.contains($0.id) }
+        }
         loadConversations()
         scanLibrary()
         NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
-                guard let self, !self.generating else { return }
+                guard let self else { return }
+                if self.generating {
+                    // Mémoire presque épuisée : mieux vaut garder la réponse partielle qu'une fermeture brutale par iOS.
+                    if Sys.availMB() < 120 {
+                        self.stop()
+                        self.status = "Génération arrêtée : mémoire presque saturée"
+                    }
+                    return
+                }
                 self.unloadModel(reason: "Déchargé (mémoire faible)")
             }
         }
@@ -367,8 +385,18 @@ enum Sys {
     }
 
     private func loadConversations() {
-        if let d = try? Data(contentsOf: PalStore.conversationsURL),
-           let list = try? JSONDecoder().decode([Conversation].self, from: d), !list.isEmpty {
+        let storeURL = PalStore.conversationsURL
+        var decoded: [Conversation]?
+        if let d = try? Data(contentsOf: storeURL), !d.isEmpty {
+            decoded = try? JSONDecoder().decode([Conversation].self, from: d)
+            if decoded == nil {
+                // Fichier présent mais illisible : on le conserve avant que la prochaine sauvegarde ne l'écrase.
+                let stamp = Int(Date().timeIntervalSince1970)
+                let backup = storeURL.deletingLastPathComponent().appendingPathComponent("conversations-illisible-\(stamp).json")
+                try? FileManager.default.copyItem(at: storeURL, to: backup)
+            }
+        }
+        if let list = decoded, !list.isEmpty {
             conversations = list
         } else if let d = try? Data(contentsOf: PalStore.legacyChatURL),
                   let old = try? JSONDecoder().decode([Msg].self, from: d), !old.isEmpty {
@@ -397,10 +425,18 @@ enum Sys {
 
     func saveConversations() {
         syncCurrent()
-        if let d = try? JSONEncoder().encode(conversations) {
-            try? d.write(to: PalStore.conversationsURL, options: .atomic)
+        let snapshot = conversations
+        let url = PalStore.conversationsURL
+        // Encodage et écriture hors du thread principal : l'interface reste fluide pendant la génération.
+        saveQueue.async {
+            if let d = try? JSONEncoder().encode(snapshot) {
+                try? d.write(to: url, options: .atomic)
+            }
         }
     }
+
+    /// Attend la fin des écritures en cours (avant la suspension de l'app).
+    func flushSaves() { saveQueue.sync { } }
 
     private func saveChat() { saveConversations() }
 
@@ -476,7 +512,11 @@ enum Sys {
     func exportFileURL(for id: UUID, format: ConversationExport) -> URL {
         let chat = conversations.first(where: { $0.id == id }) ?? Conversation(id: id, messages: messages)
         let ext = format == .markdown ? "md" : "txt"
-        let safe = chat.title.replacingOccurrences(of: "/", with: "-")
+        let invalid = CharacterSet(charactersIn: "/\\:*?\"<>|\n\r\t")
+        var safe = chat.title.components(separatedBy: invalid).joined(separator: "-")
+            .trimmingCharacters(in: .whitespaces)
+        if safe.isEmpty { safe = "Discussion" }
+        safe = String(safe.prefix(60))
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(safe).\(ext)")
         var body = format == .markdown ? "# \(chat.title)\n\n" : "\(chat.title)\n\n"
         if let model = models.first(where: { $0.id == chat.modelID }) { body += "Modèle : \(model.name)\n\n" }
@@ -507,7 +547,7 @@ enum Sys {
         }.joined(separator: "\n\n")
         // Limite la surcharge de contexte sur les appareils à mémoire réduite.
         let bounded = String(skillText.prefix(9000))
-        return base + "\n\nCompétences activées (instructions de l'utilisateur) :\n" +
+        return (base.isEmpty ? "" : base + "\n\n") + "Compétences activées (instructions de l'utilisateur) :\n" +
             bounded + "\n\nApplique ces compétences si elles sont pertinentes. Ne prétends pas avoir exécuté une action ou consulté une source si ce n'est pas le cas."
     }
 
@@ -520,7 +560,9 @@ enum Sys {
     func importSkill(_ url: URL) {
         let scopedAccess = url.startAccessingSecurityScopedResource()
         defer { if scopedAccess { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: url), data.count <= 64 * 1024,
+        let skillSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard skillSize <= 64 * 1024,
+              let data = try? Data(contentsOf: url), data.count <= 64 * 1024,
               let text = String(data: data, encoding: .utf8), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             status = "Skill invalide : fichier UTF-8 requis, 64 Ko maximum"
             return
@@ -573,18 +615,33 @@ enum Sys {
         do {
             let ext = url.pathExtension.lowercased()
             var extracted = ""
+            let limit = max(4000, min(cfg.nCtx * 4, 60000))
+            let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if fileSize > 50 * 1_048_576 { throw EngineError(msg: "Document trop volumineux (50 Mo maximum)") }
             if ext == "pdf" {
                 guard let pdf = PDFDocument(url: url) else { throw EngineError(msg: "PDF illisible") }
-                extracted = (0..<pdf.pageCount).compactMap { pdf.page(at: $0)?.string }.joined(separator: "\n\n")
+                // Lecture page par page : on s'arrête dès que la limite de contexte est atteinte.
+                var pages: [String] = []
+                var total = 0
+                for index in 0..<pdf.pageCount {
+                    guard let pageText = pdf.page(at: index)?.string else { continue }
+                    pages.append(pageText)
+                    total += pageText.count
+                    if total > limit { break }
+                }
+                extracted = pages.joined(separator: "\n\n")
             } else if ["txt", "md", "csv", "json", "html", "xml"].contains(ext) {
-                extracted = try String(contentsOf: url, encoding: .utf8)
+                if let utf8Text = try? String(contentsOf: url, encoding: .utf8) {
+                    extracted = utf8Text
+                } else {
+                    extracted = try String(contentsOf: url, encoding: .isoLatin1)
+                }
             } else if ["rtf", "doc", "docx"].contains(ext) {
                 let attributed = try NSAttributedString(url: url, options: [:], documentAttributes: nil)
                 extracted = attributed.string
             } else {
                 throw EngineError(msg: "Format non pris en charge")
             }
-            let limit = max(4000, min(cfg.nCtx * 4, 60000))
             if extracted.count > limit { extracted = String(extracted.prefix(limit)) + "\n\n[Document tronqué pour respecter la limite de contexte.]" }
             guard !extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw EngineError(msg: "Aucun texte extractible dans ce document") }
             input = "Lis et analyse ce document (\(url.lastPathComponent)) :\n\n\(extracted)"
@@ -593,7 +650,8 @@ enum Sys {
     }
 
     func insertResearchContext(_ context: String) {
-        input = context
+        let draft = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        input = draft.isEmpty ? context : input + "\n\n" + context
     }
 
     private func tap() { if cfg.haptics { UIImpactFeedbackGenerator(style: .light).impactOccurred() } }
@@ -664,6 +722,9 @@ enum Sys {
 
     private func explainLoadFailure(_ result: ModelCheck) {
         guard !engine.loaded, !loading else { return }
+        // Le chargement a échoué : l'accès sécurisé au fichier n'a plus de raison de rester ouvert.
+        scoped?.stopAccessingSecurityScopedResource()
+        scoped = nil
         if result.ok {
             status = "Échec du chargement : le modèle est reconnu (" + result.desc + ") mais n'a pas pu être chargé. Mémoire insuffisante probable : essaie un contexte plus court ou le profil Éco."
         } else {
@@ -722,14 +783,16 @@ enum Sys {
             status = "Choisis un fichier .gguf (fichier reçu : \(url.lastPathComponent))"
             return false
         }
+        guard !copyingModel else {
+            status = "Une copie est déjà en cours"
+            return false
+        }
         let access = url.startAccessingSecurityScopedResource()
-        defer { if access { url.stopAccessingSecurityScopedResource() } }
-        do {
-            let fm = FileManager.default
-            try fm.createDirectory(at: PalFolders.models, withIntermediateDirectories: true)
-            let dest = PalFolders.models.appendingPathComponent(url.lastPathComponent)
-            if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
-            try fm.copyItem(at: url, to: dest)
+        let dest = PalFolders.models.appendingPathComponent(url.lastPathComponent)
+
+        // Fichier déjà dans le dossier Models : rien à copier (l'ancienne version le supprimait avant de le copier).
+        if url.standardizedFileURL.path == dest.standardizedFileURL.path {
+            if access { url.stopAccessingSecurityScopedResource() }
             scanLibrary()
             if let rel = PalFolders.relativePath(of: dest),
                let entry = models.first(where: { $0.relPath == rel }) {
@@ -737,9 +800,52 @@ enum Sys {
                 return true
             }
             return false
-        } catch {
-            status = "Copie impossible : \(error.localizedDescription)"
+        }
+
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        if size > 0 && Sys.freeDiskBytes() < Int64(size) + 200_000_000 {
+            if access { url.stopAccessingSecurityScopedResource() }
+            status = "Espace insuffisant pour copier ce modèle"
             return false
+        }
+
+        copyingModel = true
+        status = "Copie du modèle en cours…"
+        Task.detached(priority: .utility) {
+            let fm = FileManager.default
+            let partial = PalFolders.models.appendingPathComponent(".\(UUID().uuidString).part")
+            var failure: String?
+            do {
+                try fm.createDirectory(at: PalFolders.models, withIntermediateDirectories: true)
+                try fm.copyItem(at: url, to: partial)
+                if fm.fileExists(atPath: dest.path) {
+                    _ = try fm.replaceItemAt(dest, withItemAt: partial)
+                } else {
+                    try fm.moveItem(at: partial, to: dest)
+                }
+            } catch {
+                try? fm.removeItem(at: partial)
+                failure = error.localizedDescription
+            }
+            if access { url.stopAccessingSecurityScopedResource() }
+            await self.copyFinished(dest: dest, error: failure)
+        }
+        return true
+    }
+
+    private func copyFinished(dest: URL, error: String?) {
+        copyingModel = false
+        if let error {
+            status = "Copie impossible : " + error
+            return
+        }
+        scanLibrary()
+        if let rel = PalFolders.relativePath(of: dest),
+           let entry = models.first(where: { $0.relPath == rel }) {
+            status = "Modèle copié dans Pal : " + entry.name
+            select(entry)
+        } else {
+            status = "Copie terminée, mais le modèle n'a pas été détecté : analyse le dossier Pal"
         }
     }
 
@@ -770,7 +876,7 @@ enum Sys {
         models[index].name = url.deletingPathExtension().lastPathComponent
         saveModels()
         status = "Fichier relié sans copie"
-        if wasCurrent { select(models[index]) }
+        if wasCurrent { select(models[index], force: true) }
     }
 
     /// Texte Markdown exportable depuis la feuille de partage iOS.
@@ -813,27 +919,19 @@ enum Sys {
         let defaults = Cfg()
         cfg.nCtx = defaults.nCtx; cfg.nBatch = defaults.nBatch; cfg.threads = defaults.threads
         cfg.gpuLayers = defaults.gpuLayers; cfg.maxTokens = defaults.maxTokens
-        cfg.nUBatch = defaults.nUBatch; cfg.batchThreads = defaults.batchThreads; cfg.flashAttn = defaults.flashAttn; cfg.kvQuant = defaults.kvQuant
+        cfg.nUBatch = defaults.nUBatch; cfg.flashAttn = defaults.flashAttn; cfg.kvQuant = defaults.kvQuant
         UD.removeObject(forKey: "pal.customProfile")
     }
 
-    private func effectiveThreadCounts() -> (generation: Int, batch: Int) {
-        let cores = max(1, ProcessInfo.processInfo.activeProcessorCount)
-        var generation = max(1, min(cfg.threads, cores))
-        var batch = max(1, min(cfg.batchThreads, cores))
-        guard prefs.thermalGuard else { return (generation, batch) }
+    private func effectiveThreads() -> Int {
+        var n = max(1, min(cfg.threads, ProcessInfo.processInfo.activeProcessorCount))
+        guard prefs.thermalGuard else { return n }
         switch ProcessInfo.processInfo.thermalState {
-        case .serious, .critical:
-            generation = max(1, generation / 2)
-            batch = max(1, batch / 2)
-        default:
-            break // .fair n'est pas assimilé à un bridage thermique.
+        case .serious, .critical: n = max(1, n / 2)
+        default: break   // « tiède » (.fair) est normal sous charge : on ne bride plus
         }
-        if ProcessInfo.processInfo.isLowPowerModeEnabled {
-            generation = max(1, generation - 1)
-            batch = max(1, batch - 1)
-        }
-        return (generation, batch)
+        if ProcessInfo.processInfo.isLowPowerModeEnabled { n = max(1, n - 1) }
+        return n
     }
 
     // MARK: modèle par défaut, déchargement automatique
@@ -867,20 +965,15 @@ enum Sys {
         }
     }
 
-    @discardableResult
-    func unloadModel(reason: String = "Déchargé") -> Bool {
-        guard !generating, !loading else { return false }
+    func unloadModel(reason: String = "Déchargé") {
+        guard !generating, !loading else { return }
         idleTask?.cancel()
-        guard engine.unload() else {
-            status = "Déchargement différé : le moteur est encore occupé"
-            return false
-        }
+        engine.unload()
         scoped?.stopAccessingSecurityScopedResource()
         scoped = nil
         loadedSignature = ""
         status = "\(reason) · se recharge à l'envoi"
         objectWillChange.send()
-        return true
     }
 
     private func scheduleIdleUnload() {
@@ -899,7 +992,15 @@ enum Sys {
         case .active:
             scanLibrary()
         case .background:
-            if prefs.unloadInBackground && !generating && !loading && engine.loaded {
+            flushSaves()
+            if generating {
+                beginGenerationBackgroundTask()
+                if engine.gpuActive {
+                    // Metal n'a pas le droit de calculer en arrière-plan : arrêt propre, la réponse partielle est conservée.
+                    stop()
+                    status = "Génération arrêtée : l'app est passée en arrière-plan"
+                }
+            } else if prefs.unloadInBackground && !loading && engine.loaded {
                 unloadModel(reason: "Déchargé (arrière-plan)")
             }
         default:
@@ -907,7 +1008,43 @@ enum Sys {
         }
     }
 
+    private func beginGenerationBackgroundTask() {
+        guard backgroundTask == .invalid else { return }
+        let engineRef = engine
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "pal.generation") { [weak self] in
+            // Appelé juste avant la suspension : arrêt demandé, puis fin obligatoire de la tâche.
+            engineRef.cancel = true
+            self?.endBackgroundTask()
+        }
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
+    }
+
     func remove(_ entry: ModelEntry) {
+        guard !generating, !loading else {
+            status = "Arrête la génération avant de supprimer le modèle"
+            return
+        }
+        if entry.id == currentID {
+            guard engine.unload() else {
+                status = "Impossible de décharger le modèle pour le moment"
+                return
+            }
+            scoped?.stopAccessingSecurityScopedResource()
+            scoped = nil
+            currentID = nil
+            status = "Aucun modèle"
+        }
+        models.removeAll { $0.id == entry.id }
+        saveModels()
+    }
+
+    /// Supprime le fichier d'un modèle du dossier Pal (libère l'espace).
+    func deleteModelFile(_ entry: ModelEntry) {
         guard !generating, !loading else {
             status = "Arrête la génération avant de supprimer le modèle"
             return
@@ -923,27 +1060,6 @@ enum Sys {
             currentID = nil
             status = "Aucun modèle"
         }
-        models.removeAll { $0.id == entry.id }
-        saveModels()
-    }
-
-    /// Supprime le fichier d'un modèle du dossier Pal (libère l'espace).
-    func deleteModelFile(_ entry: ModelEntry) {
-        guard !generating, !loading else {
-            status = "Arrête la génération ou attends le chargement avant de supprimer le modèle"
-            return
-        }
-        if entry.id == currentID {
-            guard engine.unload() else {
-                status = "Impossible de décharger le modèle : suppression annulée"
-                return
-            }
-            scoped?.stopAccessingSecurityScopedResource()
-            scoped = nil
-            loadedSignature = ""
-            currentID = nil
-            status = "Aucun modèle"
-        }
         if let rel = entry.relPath {
             try? FileManager.default.removeItem(at: PalFolders.url(forRelative: rel))
         }
@@ -951,8 +1067,18 @@ enum Sys {
         saveModels()
     }
 
-    func select(_ entry: ModelEntry, assign: Bool = true) {
+    func select(_ entry: ModelEntry, assign: Bool = true, force: Bool = false) {
         guard !generating, !loading else { return }
+        // Modèle déjà chargé avec les mêmes réglages : inutile de le décharger puis de le relire.
+        if !force, entry.id == currentID, engine.loaded, !needsReload {
+            if assign, let i = conversations.firstIndex(where: { $0.id == currentChatID }),
+               conversations[i].modelID != entry.id {
+                conversations[i].modelID = entry.id
+                saveConversations()
+            }
+            status = "\(engine.info) · prêt"
+            return
+        }
         idleTask?.cancel()
         let url: URL
         var didStartAccess = false
@@ -1035,7 +1161,7 @@ enum Sys {
 
     func reload() {
         if let entry = models.first(where: { $0.id == currentID }) {
-            select(entry, assign: false)
+            select(entry, assign: false, force: true)
         }
     }
 
@@ -1092,7 +1218,7 @@ enum Sys {
         genStart = Date()
         thinkEnd = nil
         UIApplication.shared.isIdleTimerDisabled = cfg.keepAwake
-        let c = cfg, e = engine, threadCounts = effectiveThreadCounts()
+        let c = cfg, e = engine, threadCount = effectiveThreads()
         // Réflexion désactivée : bloc <think> vide pré-rempli par le moteur (le texte de l'utilisateur n'est jamais modifié).
         let noThink = !prefs.reasoningEnabled
         // Mode Éco : priorité de tâche basse et rafraîchissement moins fréquent.
@@ -1101,7 +1227,7 @@ enum Sys {
         let uiInterval: Double = eco ? 0.15 : 0.08
         e.prepareGeneration()
         Task.detached(priority: priority) {
-            e.setThreads(generation: threadCounts.generation, batch: threadCounts.batch)
+            e.setThreads(threadCount)
             var acc = "", last = Date()
             do {
                 let st = try e.generate(user: text, cfg: c, noThink: noThink) { p in
@@ -1149,8 +1275,10 @@ enum Sys {
         streaming = nil; saveChat(); tap()
         UIApplication.shared.isIdleTimerDisabled = false
         scheduleIdleUnload()
-        if st != nil, err == nil, prefs.ttsAuto, !text.isEmpty {
-            speaker.speak(text, voiceID: prefs.ttsVoice, rate: prefs.ttsRate)
+        endBackgroundTask()
+        if st != nil, err == nil, st?.cancelled != true, prefs.ttsAuto, !text.isEmpty {
+            let spoken = ThinkSplit.parse(text, modelThinks: modelThinks, streaming: false).answer
+            if !spoken.isEmpty { speaker.speak(spoken, voiceID: prefs.ttsVoice, rate: prefs.ttsRate) }
         }
     }
 
@@ -1163,7 +1291,7 @@ enum Sys {
     }
 
     func regenerate() {
-        guard !generating, messages.count >= 2, messages.last?.role == "assistant" else { return }
+        guard !generating, !loading, messages.count >= 2, messages.last?.role == "assistant" else { return }
         messages.removeLast()
         input = messages.removeLast().text
         engine.restore(system: effectiveSystemPrompt, history: messages)
@@ -1186,15 +1314,11 @@ enum Sys {
         loading = true
         benchmark = "Benchmark en cours… (1 échauffement + 3 mesures)"
         var c = cfg; c.temp = 0; c.maxTokens = 64
-        let configuredGeneration = c.threads
-        let configuredBatch = c.batchThreads
-        let activeThreads = effectiveThreadCounts()
-        let thermalState = Sys.thermal
-        let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
-        let thermalGuard = prefs.thermalGuard
+        // Nombre de threads réellement appliqué = celui affiché dans le résultat (reproductible, sans bridage thermique).
+        c.threads = max(1, min(c.threads, ProcessInfo.processInfo.activeProcessorCount))
         let e = engine, saved = messages, sys = effectiveSystemPrompt
         Task.detached(priority: .userInitiated) {
-            e.setThreads(generation: activeThreads.generation, batch: activeThreads.batch)
+            e.setThreads(c.threads)
             let prompt = "Explique en quelques phrases comment fonctionne un moteur à explosion."
             var measured: [GenStats] = []
             do {
@@ -1214,9 +1338,7 @@ enum Sys {
             } catch {
                 measured.removeAll()
             }
-            await self.finishBenchmark(measured.isEmpty ? nil : measured, saved, sys, c,
-                                       configuredGeneration, configuredBatch, thermalState,
-                                       thermalGuard, lowPower)
+            await self.finishBenchmark(measured.isEmpty ? nil : measured, saved, sys, c)
         }
     }
 
@@ -1230,9 +1352,7 @@ enum Sys {
         return sorted[middle]
     }
 
-    private func finishBenchmark(_ samples: [GenStats]?, _ saved: [Msg], _ sys: String, _ c: Cfg,
-                                 _ configuredGeneration: Int, _ configuredBatch: Int,
-                                 _ thermalState: String, _ thermalGuard: Bool, _ lowPower: Bool) {
+    private func finishBenchmark(_ samples: [GenStats]?, _ saved: [Msg], _ sys: String, _ c: Cfg) {
         engine.resetCache()
         engine.restore(system: sys, history: saved)
         loading = false
@@ -1252,16 +1372,7 @@ enum Sys {
 
         let cache = c.kvQuant == 1 ? "Q8" : "F16"
         let backend = engine.gpuActive ? "Metal" : "CPU"
-        let thermalEnd = Sys.thermal
-        let activeGeneration = engine.appliedGenerationThreads
-        let activeBatch = engine.appliedBatchThreads
-        benchmark = String(format: "Médiane 3 runs · pp %.1f t/s · tg %.1f t/s · TTFT %.2f s (post %.2f s) · format %.0f ms · tokenize %.0f ms · prefill %.2f s · decode %.2f s · %@ · gen %d/%dT · batch %d/%dT · batch %d/%d · ctx %d · K/V %@ · état thermique iOS %@→%@ (garde %@, économie %@) · RAM %.0f Mo",
-                           r.promptTps, r.genTps, r.ttft, r.firstTokenAfterPrefill,
-                           r.formatSeconds * 1000, r.tokenizeSeconds * 1000, r.prefillSeconds,
-                           r.decodeSeconds, backend, activeGeneration, configuredGeneration,
-                           activeBatch, configuredBatch, c.nBatch, c.nUBatch, c.nCtx, cache,
-                           thermalState, thermalEnd, thermalGuard ? "oui" : "non", lowPower ? "oui" : "non",
-                           Sys.footprintMB())
+        benchmark = String(format: "Médiane 3 runs · pp %.1f t/s · tg %.1f t/s · TTFT %.2f s (post %.2f s) · format %.0f ms · tokenize %.0f ms · prefill %.2f s · decode %.2f s · %@ %dT · batch %d/%d · ctx %d · K/V %@ · RAM %.0f Mo", r.promptTps, r.genTps, r.ttft, r.firstTokenAfterPrefill, r.formatSeconds * 1000, r.tokenizeSeconds * 1000, r.prefillSeconds, r.decodeSeconds, backend, c.threads, c.nBatch, c.nUBatch, c.nCtx, cache, Sys.footprintMB())
         Advisor.recordBenchmark(model: currentName, gpu: engine.gpuActive, cfg: c, tg: r.genTps, pp: r.promptTps)
     }
 }

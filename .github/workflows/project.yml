@@ -29,8 +29,8 @@ targets:
       properties:
         CFBundleDisplayName: Pal
         CFBundleName: Pal
-        CFBundleShortVersionString: "1.4.2"
-        CFBundleVersion: "11"
+        CFBundleShortVersionString: "1.4.3"
+        CFBundleVersion: "12"
         UILaunchStoryboardName: LaunchScreen
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true

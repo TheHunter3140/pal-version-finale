@@ -38,11 +38,6 @@ for symbol in \
   'llama_memory_seq_rm' \
   'llama_sampler_init_penalties' \
   'llama_supports_gpu_offload' \
-  'llama_set_n_threads' \
-  'load_mode' \
-  'LLAMA_LOAD_MODE_MMAP' \
-  'LLAMA_LOAD_MODE_NONE' \
-  'n_threads_batch' \
   'flash_attn_type' \
   'type_k' \
   'type_v'; do
@@ -62,7 +57,6 @@ SYMBOLS=$(nm -gU "$BIN")
 for symbol in \
   '_llama_batch_get_one' \
   '_llama_memory_seq_rm' \
-  '_llama_set_n_threads' \
   '_mtmd_init_from_file' \
   '_mtmd_tokenize' \
   '_mtmd_helper_eval_chunks'; do

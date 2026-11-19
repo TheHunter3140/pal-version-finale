@@ -40,14 +40,18 @@ final class Speaker: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     func stop() {
         currentUtterance = nil
         speakingText = nil
+        // La session audio est libérée à la fin réelle de la lecture (didCancel / didFinish) :
+        // la désactiver ici échouait pendant l'arrêt et laissait la musique en sourdine.
         if let s = synth, s.isSpeaking { s.stopSpeaking(at: .immediate) }
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     private func finished(_ utterance: AVSpeechUtterance) {
-        guard utterance === currentUtterance else { return }
-        currentUtterance = nil
-        speakingText = nil
+        if utterance === currentUtterance {
+            currentUtterance = nil
+            speakingText = nil
+        }
+        // Une nouvelle lecture a déjà démarré : on ne coupe pas sa session.
+        guard currentUtterance == nil else { return }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 

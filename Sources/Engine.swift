@@ -31,6 +31,8 @@ final class Engine: @unchecked Sendable {
     private var vocab: OpaquePointer?
     private var messages: [(String, String)] = []
     private var nBatch = 256
+    /// Vrai si le dernier essai a chargé les poids mais échoué à créer le contexte (RAM insuffisante).
+    private var contextAllocationFailed = false
     /// Tokens actuellement présents dans le cache KV (séquence 0), dans l'ordre.
     private var cached: [llama_token] = []
     private var pieceBuffer = [CChar](repeating: 0, count: 128)
@@ -43,14 +45,11 @@ final class Engine: @unchecked Sendable {
     /// pendant un `llama_decode`).
     private let lifecycle = NSCondition()
     private var busy = false
-    private var modelChanging = false
-    private(set) var appliedGenerationThreads = 0
-    private(set) var appliedBatchThreads = 0
 
     private func beginTask() -> Bool {
         lifecycle.lock()
         defer { lifecycle.unlock() }
-        guard !busy, !modelChanging else { return false }
+        if busy { return false }
         busy = true
         return true
     }
@@ -66,7 +65,7 @@ final class Engine: @unchecked Sendable {
     /// Ainsi, un Stop reçu juste après l’envoi n’est pas écrasé par la tâche détachée.
     func prepareGeneration() {
         lifecycle.lock()
-        if !busy && !modelChanging { cancel = false }
+        if !busy { cancel = false }
         lifecycle.unlock()
     }
 
@@ -100,16 +99,21 @@ final class Engine: @unchecked Sendable {
         llama_backend_init()
     }
 
+    deinit {
+        releaseResources()
+    }
+
     // MARK: - Chargement
 
     @discardableResult
     func load(path: String, cfg: Cfg, mmap: Bool = true) -> Bool {
-        guard beginModelChange(timeout: 20) else {
-            notice = "Génération ou changement de modèle en cours : chargement annulé"
+        guard unload() else {
+            notice = "Génération en cours : modèle non rechargé"
             return false
         }
-        defer { endModelChange() }
-        releaseResources()
+        // Cette version du XCFramework n'expose pas use_mmap dans
+        // llama_model_params ; l'argument est conservé pour l'interface VM.
+        _ = mmap
         notice = ""
 
         var layers = max(0, cfg.gpuLayers)
@@ -117,26 +121,39 @@ final class Engine: @unchecked Sendable {
             layers = 0
             notice = "Metal indisponible : CPU utilisé"
         }
-        if tryLoad(path: path, cfg: cfg, layers: layers, mmap: mmap) {
+        if tryLoad(path: path, cfg: cfg, layers: layers) {
             gpuActive = layers > 0
             return true
         }
         // Repli automatique : si le GPU fait échouer le chargement, on retente sur CPU.
         if layers > 0 {
             notice = "GPU refusé : rechargé sur CPU"
-            if tryLoad(path: path, cfg: cfg, layers: 0, mmap: mmap) {
+            if tryLoad(path: path, cfg: cfg, layers: 0) {
                 gpuActive = false
                 return true
+            }
+        }
+        // Dernier recours : les poids se chargent mais pas le cache de contexte (mémoire insuffisante).
+        // On réduit progressivement le contexte plutôt que d'échouer.
+        if contextAllocationFailed {
+            var reduced = cfg
+            while reduced.nCtx > 1024 {
+                reduced.nCtx = max(1024, reduced.nCtx / 2)
+                if tryLoad(path: path, cfg: reduced, layers: 0) {
+                    gpuActive = false
+                    notice = (notice.isEmpty ? "" : notice + " · ") + "Mémoire insuffisante : contexte réduit à \(reduced.nCtx)"
+                    return true
+                }
+                if !contextAllocationFailed { break }
             }
         }
         return false
     }
 
-    private func tryLoad(path: String, cfg: Cfg, layers: Int, mmap: Bool) -> Bool {
+    private func tryLoad(path: String, cfg: Cfg, layers: Int) -> Bool {
+        contextAllocationFailed = false
         var modelParams = llama_model_default_params()
         modelParams.n_gpu_layers = Int32(layers)
-        // llama-b12130 expose explicit load_mode : mmap est réellement configurable.
-        modelParams.load_mode = mmap ? LLAMA_LOAD_MODE_MMAP : LLAMA_LOAD_MODE_NONE
 
         let loadedModel: OpaquePointer? = path.withCString { cPath in
             llama_model_load_from_file(cPath, modelParams)
@@ -149,20 +166,19 @@ final class Engine: @unchecked Sendable {
         }
 
         var contextParams = llama_context_default_params()
-        let contextSize = max(512, cfg.nCtx)
+        let contextSize = min(max(512, cfg.nCtx), Cfg.maxContext)
         let batchSize = max(32, min(cfg.nBatch, contextSize))
         contextParams.n_ctx = UInt32(contextSize)
         contextParams.n_batch = UInt32(batchSize)
         contextParams.n_ubatch = UInt32(max(32, min(cfg.nUBatch, batchSize)))
-        let cores = max(1, ProcessInfo.processInfo.activeProcessorCount)
-        let generationThreads = max(1, min(cfg.threads, cores))
-        let batchThreads = max(1, min(cfg.batchThreads, cores))
-        contextParams.n_threads = Int32(generationThreads)
-        contextParams.n_threads_batch = Int32(batchThreads)
+        let threadCount = max(1, min(cfg.threads, ProcessInfo.processInfo.activeProcessorCount))
+        contextParams.n_threads = Int32(threadCount)
+        contextParams.n_threads_batch = Int32(threadCount)
         applyAdvanced(&contextParams, cfg: cfg)
 
         guard let loadedContext = llama_init_from_model(loadedModel, contextParams) else {
             llama_model_free(loadedModel)
+            contextAllocationFailed = true
             return false
         }
 
@@ -173,8 +189,6 @@ final class Engine: @unchecked Sendable {
         nCtx = Int(llama_n_ctx(loadedContext))
         nPast = 0
         cached = []
-        appliedGenerationThreads = generationThreads
-        appliedBatchThreads = batchThreads
         let templateText = llama_model_chat_template(loadedModel, nil).map { String(cString: $0) } ?? ""
         thinkTemplate = templateText.contains("<think>")
         info = String(
@@ -203,51 +217,26 @@ final class Engine: @unchecked Sendable {
     }
 
     /// Ajuste le nombre de threads à chaud (protection thermique / économie d'énergie).
-    func setThreads(generation: Int, batch: Int) {
+    func setThreads(_ count: Int) {
         lifecycle.lock()
         defer { lifecycle.unlock() }
         // Ne jamais modifier les paramètres du contexte pendant llama_decode/sample.
-        guard !busy, !modelChanging, let context = ctx else { return }
-        let cores = max(1, ProcessInfo.processInfo.activeProcessorCount)
-        let gen = max(1, min(generation, cores))
-        let bat = max(1, min(batch, cores))
-        llama_set_n_threads(context, Int32(gen), Int32(bat))
-        appliedGenerationThreads = gen
-        appliedBatchThreads = bat
+        guard !busy, let context = ctx else { return }
+        let n = Int32(max(1, count))
+        llama_set_n_threads(context, n, n)
     }
 
-    /// Réserve exclusivement le cycle de vie du modèle avant d'attendre la génération.
-    /// Les nouvelles générations sont refusées jusqu'à la fin du changement de modèle.
-    private func beginModelChange(timeout: TimeInterval) -> Bool {
+    /// Libère le modèle. Si une génération est en cours, demande son arrêt puis attend
+    /// sa fin réelle (20 s max). Retourne false, sans rien libérer, si elle ne s'arrête pas.
+    @discardableResult
+    func unload(timeout: TimeInterval = 20) -> Bool {
         lifecycle.lock()
-        while modelChanging { lifecycle.wait() }
-        modelChanging = true
+        defer { lifecycle.unlock() }
         if busy { cancel = true }
         let deadline = Date().addingTimeInterval(timeout)
         while busy {
-            if !lifecycle.wait(until: deadline) && busy {
-                modelChanging = false
-                lifecycle.broadcast()
-                lifecycle.unlock()
-                return false
-            }
+            if !lifecycle.wait(until: deadline) { return false }
         }
-        lifecycle.unlock()
-        return true
-    }
-
-    private func endModelChange() {
-        lifecycle.lock()
-        modelChanging = false
-        lifecycle.broadcast()
-        lifecycle.unlock()
-    }
-
-    /// Libère le modèle uniquement après la fin réelle de toute génération.
-    @discardableResult
-    func unload(timeout: TimeInterval = 20) -> Bool {
-        guard beginModelChange(timeout: timeout) else { return false }
-        defer { endModelChange() }
         releaseResources()
         return true
     }
@@ -264,26 +253,18 @@ final class Engine: @unchecked Sendable {
         nCtx = 0
         gpuActive = false
         thinkTemplate = false
-        appliedGenerationThreads = 0
-        appliedBatchThreads = 0
         info = "—"
     }
 
     /// Recharge l'historique visible dans l'application. Le cache KV est CONSERVÉ :
     /// au prochain tour, seul le préfixe identique est réutilisé, le reste est retraité.
     func restore(system: String, history: [Msg]) {
-        lifecycle.lock()
-        defer { lifecycle.unlock() }
-        guard !busy && !modelChanging else { return }
         messages = (system.isEmpty ? [] : [("system", system)])
             + history.map { ($0.role, $0.text) }
     }
 
     /// Vide le cache KV (benchmark, état incertain après une erreur).
     func resetCache() {
-        lifecycle.lock()
-        defer { lifecycle.unlock() }
-        guard !busy && !modelChanging else { return }
         if let context = ctx {
             llama_memory_clear(llama_get_memory(context), true)
         }
@@ -420,6 +401,10 @@ final class Engine: @unchecked Sendable {
             }
             llama_sampler_chain_add(sampler, distribution)
 
+            // Les derniers tokens du prompt comptent aussi pour la pénalité de répétition.
+            if cfg.repeatPen != 1.0 {
+                for promptToken in tokens.suffix(64) { llama_sampler_accept(sampler, promptToken) }
+            }
         }
 
         var stats = GenStats()
@@ -480,10 +465,17 @@ final class Engine: @unchecked Sendable {
             }
 
             appendPiece(token, vocabulary: vocabulary, to: &pendingBytes)
-            let text = drainUTF8(&pendingBytes, final: false)
-            if !text.isEmpty {
+            if let text = String(bytes: pendingBytes, encoding: .utf8) {
                 output += text
                 onToken(text)
+                pendingBytes.removeAll(keepingCapacity: true)
+            } else if pendingBytes.count >= 4 {
+                // Un caractère UTF-8 valide tient en 4 octets au plus : au-delà, la séquence est
+                // invalide. On la vide (caractère de remplacement) au lieu de bloquer l'affichage.
+                let text = String(decoding: pendingBytes, as: UTF8.self)
+                output += text
+                onToken(text)
+                pendingBytes.removeAll(keepingCapacity: true)
             }
 
             guard decodeOne(token) else {
@@ -500,11 +492,9 @@ final class Engine: @unchecked Sendable {
         }
 
         if !pendingBytes.isEmpty {
-            let tail = drainUTF8(&pendingBytes, final: true)
-            if !tail.isEmpty {
-                output += tail
-                onToken(tail)
-            }
+            let tail = String(decoding: pendingBytes, as: UTF8.self)
+            output += tail
+            onToken(tail)
         }
 
         stats.cancelled = cancel
@@ -517,6 +507,8 @@ final class Engine: @unchecked Sendable {
         // Débit stable hors premier token, conforme à la convention (N-1)/temps_après_TTFT.
         if let firstTokenAt, stats.genN > 1 {
             stats.genTps = Double(stats.genN - 1) / max(generationEnd.timeIntervalSince(firstTokenAt), 0.001)
+        } else if stats.genN == 1 {
+            stats.genTps = 1 / max(stats.decodeSeconds, 0.001)
         }
         messages.append(("assistant", output))
         return stats
@@ -588,63 +580,6 @@ final class Engine: @unchecked Sendable {
             capacity = Int(-count) + 8
         }
         return []
-    }
-
-    /// Décode le préfixe UTF-8 complet, remplace immédiatement les octets invalides
-    /// et conserve uniquement un suffixe potentiellement incomplet (1 à 3 octets).
-    private func drainUTF8(_ bytes: inout [UInt8], final: Bool) -> String {
-        var output = String()
-        var index = 0
-        while index < bytes.count {
-            let first = bytes[index]
-            let length: Int
-            if first <= 0x7F { length = 1 }
-            else if first >= 0xC2 && first <= 0xDF { length = 2 }
-            else if first >= 0xE0 && first <= 0xEF { length = 3 }
-            else if first >= 0xF0 && first <= 0xF4 { length = 4 }
-            else {
-                output.append("\\u{FFFD}")
-                index += 1
-                continue
-            }
-
-            if index + length > bytes.count {
-                if !final { break }
-                output.append("\\u{FFFD}")
-                index += 1
-                continue
-            }
-
-            var valid = true
-            if length > 1 {
-                for offset in 1..<length {
-                    let continuation = bytes[index + offset]
-                    if continuation < 0x80 || continuation > 0xBF {
-                        valid = false
-                        break
-                    }
-                }
-                if valid {
-                    let second = bytes[index + 1]
-                    if (first == 0xE0 && second < 0xA0)
-                        || (first == 0xED && second > 0x9F)
-                        || (first == 0xF0 && second < 0x90)
-                        || (first == 0xF4 && second > 0x8F) {
-                        valid = false
-                    }
-                }
-            }
-
-            if valid {
-                output += String(decoding: bytes[index..<(index + length)], as: UTF8.self)
-                index += length
-            } else {
-                output.append("\\u{FFFD}")
-                index += 1
-            }
-        }
-        if index > 0 { bytes.removeFirst(index) }
-        return output
     }
 
     /// Ajoute les octets du token à `bytes` sans créer de tableau intermédiaire.

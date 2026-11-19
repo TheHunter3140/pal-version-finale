@@ -74,6 +74,22 @@ enum PalTab: Int, CaseIterable, Identifiable {
 
 enum ChatRoute: Hashable { case chat }
 
+/// Fichier d'export prêt à partager (créé seulement quand l'utilisateur le demande).
+struct SharedFile: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+
 struct RootView: View {
     @EnvironmentObject private var vm: VM
     @Environment(\.scenePhase) private var scenePhase
@@ -180,6 +196,7 @@ struct ChatsTab: View {
     @State private var renaming: Conversation?
     @State private var newTitle = ""
     @State private var showArchived = false
+    @State private var shared: SharedFile?
 
     private var chats: [Conversation] {
         let all = vm.conversations
@@ -221,8 +238,9 @@ struct ChatsTab: View {
                     .contextMenu {
                         Button("Renommer") { newTitle = chat.title; renaming = chat }
                         Button(showArchived ? "Désarchiver" : "Archiver") { vm.setArchived(chat.id, !showArchived) }
-                        ShareLink(item: vm.exportFileURL(for: chat.id, format: .markdown)) { Label("Exporter en Markdown", systemImage: "doc.text") }
-                        ShareLink(item: vm.exportFileURL(for: chat.id, format: .txt)) { Label("Exporter en TXT", systemImage: "doc.plaintext") }
+                        // Export à la demande : l'ancien code écrivait deux fichiers par conversation à chaque affichage de la liste.
+                        Button { shared = SharedFile(url: vm.exportFileURL(for: chat.id, format: .markdown)) } label: { Label("Exporter en Markdown", systemImage: "doc.text") }
+                        Button { shared = SharedFile(url: vm.exportFileURL(for: chat.id, format: .txt)) } label: { Label("Exporter en TXT", systemImage: "doc.plaintext") }
                         Button("Supprimer", role: .destructive) { vm.deleteChat(chat.id) }
                     }
                 }
@@ -249,6 +267,7 @@ struct ChatsTab: View {
                 }
             }
             .navigationDestination(for: ChatRoute.self) { _ in ChatScreen() }
+            .sheet(item: $shared) { file in ShareSheet(items: [file.url]) }
             .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 72) }
             .alert(
                 "Renommer la discussion",
@@ -364,7 +383,8 @@ struct ChatScreen: View {
         .fileImporter(isPresented: $showDocumentImporter, allowedContentTypes: [.pdf, .plainText, .rtf, UTType(filenameExtension: "docx") ?? .data], allowsMultipleSelection: false) { result in
             switch result {
             case .success(let urls): if let url = urls.first { vm.importDocument(url) }
-            case .failure(let error): vm.status = "Import impossible : \(error.localizedDescription)"
+            case .failure(let error):
+                if (error as? CocoaError)?.code != .userCancelled { vm.status = "Import impossible : \(error.localizedDescription)" }
             }
         }
         .alert("Renommer la discussion", isPresented: $renaming) {
@@ -534,6 +554,7 @@ struct ChatMenuSheet: View {
     let onImport: () -> Void
     let onArchive: () -> Void
     @EnvironmentObject private var vm: VM
+    @State private var shared: SharedFile?
 
     var body: some View {
         VStack(spacing: 10) {
@@ -541,20 +562,17 @@ struct ChatMenuSheet: View {
             ActionRow(icon: "pencil", title: "Renommer la conversation", action: onRename)
             ActionRow(icon: "magnifyingglass", title: "Rechercher", action: onSearch)
             ActionRow(icon: "doc.text", title: "Importer un document", subtitle: "PDF, texte, RTF, Word si pris en charge", action: onImport)
-            ShareLink(item: vm.exportFileURL(for: vm.currentChatID, format: .markdown)) {
-                Label("Exporter en Markdown", systemImage: "square.and.arrow.up")
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(14)
-                    .background(Color(.tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
-            }.buttonStyle(.plain)
-            ShareLink(item: vm.exportFileURL(for: vm.currentChatID, format: .txt)) {
-                Label("Exporter en TXT", systemImage: "doc.plaintext")
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(14)
-                    .background(Color(.tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
-            }.buttonStyle(.plain)
+            ActionRow(icon: "square.and.arrow.up", title: "Exporter en Markdown", action: {
+                shared = SharedFile(url: vm.exportFileURL(for: vm.currentChatID, format: .markdown))
+            })
+            ActionRow(icon: "doc.plaintext", title: "Exporter en TXT", action: {
+                shared = SharedFile(url: vm.exportFileURL(for: vm.currentChatID, format: .txt))
+            })
             ActionRow(icon: "archivebox", title: "Archiver cette discussion", action: onArchive)
             ActionRow(icon: "trash", title: "Supprimer", tint: Color.red, action: onDelete)
         }
         .padding(20)
+        .sheet(item: $shared) { file in ShareSheet(items: [file.url]) }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
     }

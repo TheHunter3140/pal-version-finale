@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import CryptoKit
 
 // MARK: - Jeton Hugging Face (Trousseau, avec repli si iOS le refuse)
 
@@ -78,6 +79,7 @@ enum HF {
     struct RepoFile: Identifiable, Hashable {
         let path: String
         let size: Int64
+        let sha256: String?
         var id: String { path }
         var name: String { (path as NSString).lastPathComponent }
         var isMMProj: Bool { name.lowercased().contains("mmproj") }
@@ -85,7 +87,7 @@ enum HF {
     }
 
     private struct TreeItem: Decodable {
-        struct LFS: Decodable { let size: Int64? }
+        struct LFS: Decodable { let size: Int64?; let oid: String? }
         let type: String
         let path: String
         let size: Int64?
@@ -140,7 +142,7 @@ enum HF {
         let data = try await fetch(url, token: token)
         let items = (try? JSONDecoder().decode([TreeItem].self, from: data)) ?? []
         let ggufs = items.filter { $0.type == "file" && $0.path.lowercased().hasSuffix(".gguf") }
-        let mapped = ggufs.map { RepoFile(path: $0.path, size: $0.lfs?.size ?? $0.size ?? 0) }
+        let mapped = ggufs.map { RepoFile(path: $0.path, size: $0.lfs?.size ?? $0.size ?? 0, sha256: $0.lfs?.oid) }
         return mapped.sorted { $0.size < $1.size }
     }
 
@@ -172,7 +174,8 @@ enum HF {
             if let r = clean.range(of: marker) {
                 let comps = String(clean[r.upperBound...]).split(separator: "/").map { String($0) }
                 if comps.count >= 2 {
-                    let path = comps.dropFirst().joined(separator: "/")
+                    let rawPath = comps.dropFirst().joined(separator: "/")
+                    let path = rawPath.removingPercentEncoding ?? rawPath
                     if path.lowercased().hasSuffix(".gguf") { return (repo, path) }
                 }
             }
@@ -208,6 +211,7 @@ struct DownloadItem: Identifiable, Codable, Equatable {
     var error: String? = nil
     var retries = 0
     var speed: Double = 0
+    var sha256: String? = nil
 
     var fraction: Double {
         total > 0 ? min(1, Double(received) / Double(total)) : 0
@@ -226,6 +230,16 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
     private var session: URLSession?
     private var activated = false
     private var lastTick: [UUID: (date: Date, bytes: Int64)] = [:]
+    // Limite le nombre de rafraîchissements envoyés au thread principal (le delegate reçoit des centaines d'appels par seconde).
+    private let tickLock = NSLock()
+    private var lastDispatch: [UUID: CFAbsoluteTime] = [:]
+
+    private func forget(_ id: UUID) {
+        lastTick[id] = nil
+        tickLock.lock()
+        lastDispatch[id] = nil
+        tickLock.unlock()
+    }
 
     override init() {
         super.init()
@@ -322,7 +336,7 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
 
     /// Retourne un message d'erreur si le téléchargement ne peut pas démarrer.
     @discardableResult
-    func start(repo: String, remotePath: String, size: Int64) -> String? {
+    func start(repo: String, remotePath: String, size: Int64, sha256: String? = nil) -> String? {
         activate()
         let filename = (remotePath as NSString).lastPathComponent
         let dest = PalFolders.models.appendingPathComponent(filename)
@@ -331,6 +345,9 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
         }
         if items.contains(where: { $0.repo == repo && $0.remotePath == remotePath && $0.state != .done }) {
             return "Ce fichier est déjà dans la liste des téléchargements."
+        }
+        if items.contains(where: { $0.filename == filename && $0.state != .done }) {
+            return "Un téléchargement nommé « \(filename) » est déjà en cours."
         }
         if size > 0 && Sys.freeDiskBytes() < size + 300_000_000 {
             return "Espace insuffisant : il faut environ \(Self.sizeString(size + 300_000_000)) de libre."
@@ -345,6 +362,7 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
             urlString: "https://huggingface.co/\(repo)/resolve/main/\(encoded)?download=true"
         )
         item.total = size
+        item.sha256 = sha256?.lowercased()
         items.append(item)
         persist()
         launch(item)
@@ -369,8 +387,10 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
             }
             task = current.downloadTask(with: request)
         }
-        task.taskDescription = item.id.uuidString + "|" + item.filename
+        // Format : identifiant|nom du fichier|SHA-256 attendu (vide si inconnu).
+        task.taskDescription = item.id.uuidString + "|" + item.filename + "|" + (item.sha256 ?? "")
         task.resume()
+        forget(item.id)
         lastTick[item.id] = (Date(), item.received)
         update(item.id) {
             $0.state = .downloading
@@ -410,6 +430,7 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
         let wasRunning = items.first(where: { $0.id == id })?.state == .downloading
         items.removeAll { $0.id == id }
         clearResume(id)
+        forget(id)
         persist()
         if wasRunning, let current = session {
             current.getAllTasks { tasks in
@@ -420,6 +441,7 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
 
     private func complete(_ id: UUID, _ dest: URL) {
         clearResume(id)
+        forget(id)
         update(id) {
             $0.state = .done
             if $0.total > 0 { $0.received = $0.total }
@@ -432,6 +454,7 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
 
     private func fail(_ id: UUID, _ message: String, resumable: Bool) {
         if !resumable { clearResume(id) }
+        forget(id)
         update(id) {
             $0.state = .failed
             $0.error = message
@@ -450,8 +473,36 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
 
     static func filename(_ task: URLSessionTask) -> String? {
         guard let description = task.taskDescription,
-              let bar = description.firstIndex(of: "|") else { return nil }
-        return String(description[description.index(after: bar)...])
+              let first = description.firstIndex(of: "|") else { return nil }
+        let afterFirst = description.index(after: first)
+        // Format récent : id|nom|sha256 ; ancien format (tâches déjà en cours) : id|nom.
+        if let last = description.lastIndex(of: "|"), last > first {
+            let tail = description[description.index(after: last)...]
+            if tail.isEmpty || (tail.count == 64 && tail.allSatisfy { $0.isHexDigit }) {
+                return String(description[afterFirst..<last])
+            }
+        }
+        return String(description[afterFirst...])
+    }
+
+    static func expectedSHA(_ task: URLSessionTask) -> String? {
+        guard let description = task.taskDescription,
+              let last = description.lastIndex(of: "|") else { return nil }
+        let tail = String(description[description.index(after: last)...])
+        return tail.count == 64 && tail.allSatisfy({ $0.isHexDigit }) ? tail.lowercased() : nil
+    }
+
+    /// SHA-256 calculée par blocs (jamais le fichier entier en mémoire). nil si la lecture échoue.
+    private static func sha256(of url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk: Data? = autoreleasepool { try? handle.read(upToCount: 4 * 1_048_576) }
+            guard let data = chunk, !data.isEmpty else { break }
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private static func describe(_ error: NSError) -> String {
@@ -485,6 +536,12 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
                     didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
                     totalBytesExpectedToWrite: Int64) {
         guard let id = DownloadManager.itemID(downloadTask) else { return }
+        let nowTime = CFAbsoluteTimeGetCurrent()
+        tickLock.lock()
+        let skip = nowTime - (lastDispatch[id] ?? 0) < 0.5
+        if !skip { lastDispatch[id] = nowTime }
+        tickLock.unlock()
+        if skip { return }
         DispatchQueue.main.async {
             let now = Date()
             if let tick = self.lastTick[id] {
@@ -547,12 +604,24 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
             return
         }
 
+        // Intégrité : somme SHA-256 publiée par Hugging Face pour les fichiers LFS.
+        if let expectedHash = DownloadManager.expectedSHA(downloadTask),
+           let actualHash = DownloadManager.sha256(of: location), actualHash != expectedHash {
+            DispatchQueue.main.async {
+                self.fail(id, "Fichier corrompu : la somme de contrôle SHA-256 ne correspond pas. Relance le téléchargement.", resumable: false)
+            }
+            return
+        }
+
         let fm = FileManager.default
         let dest = PalFolders.models.appendingPathComponent(filename)
         do {
             try fm.createDirectory(at: PalFolders.models, withIntermediateDirectories: true)
-            if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
-            try fm.moveItem(at: location, to: dest)
+            if fm.fileExists(atPath: dest.path) {
+                _ = try fm.replaceItemAt(dest, withItemAt: location)
+            } else {
+                try fm.moveItem(at: location, to: dest)
+            }
             DispatchQueue.main.async { self.complete(id, dest) }
         } catch {
             let message = "Enregistrement impossible : " + error.localizedDescription
@@ -895,7 +964,7 @@ struct RepoFilesView: View {
             Image(systemName: "arrow.down.circle.dotted").foregroundStyle(.secondary)
         } else {
             Button {
-                message = manager.start(repo: repo, remotePath: file.path, size: file.size)
+                message = manager.start(repo: repo, remotePath: file.path, size: file.size, sha256: file.sha256)
                     ?? "Téléchargement démarré : suis-le dans la liste Hugging Face."
             } label: {
                 Image(systemName: "arrow.down.circle").font(.title2)

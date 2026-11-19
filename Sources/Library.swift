@@ -15,6 +15,11 @@ enum PalFolders {
         for dir in [models, skills] {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
+        // Les modèles (plusieurs Go) ne doivent pas gonfler la sauvegarde iCloud / iTunes.
+        var modelsDir = models
+        var backupFlag = URLResourceValues()
+        backupFlag.isExcludedFromBackup = true
+        try? modelsDir.setResourceValues(backupFlag)
         let note = documents.appendingPathComponent("LISEZMOI.txt")
         if !fm.fileExists(atPath: note.path) {
             let text = """
@@ -97,24 +102,26 @@ struct Prefs: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        mmap = try c.decodeIfPresent(Bool.self, forKey: .mmap) ?? true
-        thermalGuard = try c.decodeIfPresent(Bool.self, forKey: .thermalGuard) ?? true
-        launchMode = try c.decodeIfPresent(Int.self, forKey: .launchMode) ?? 0
+        // Valeurs de repli = valeurs par défaut officielles (police serif, taille minimale de référence).
+        let d = Prefs()
+        mmap = try c.decodeIfPresent(Bool.self, forKey: .mmap) ?? d.mmap
+        thermalGuard = try c.decodeIfPresent(Bool.self, forKey: .thermalGuard) ?? d.thermalGuard
+        launchMode = try c.decodeIfPresent(Int.self, forKey: .launchMode) ?? d.launchMode
         launchModelID = try c.decodeIfPresent(String.self, forKey: .launchModelID)
         newChatModelID = try c.decodeIfPresent(String.self, forKey: .newChatModelID)
-        autoUnloadMinutes = try c.decodeIfPresent(Int.self, forKey: .autoUnloadMinutes) ?? 10
-        unloadInBackground = try c.decodeIfPresent(Bool.self, forKey: .unloadInBackground) ?? true
-        ttsAuto = try c.decodeIfPresent(Bool.self, forKey: .ttsAuto) ?? false
+        autoUnloadMinutes = try c.decodeIfPresent(Int.self, forKey: .autoUnloadMinutes) ?? d.autoUnloadMinutes
+        unloadInBackground = try c.decodeIfPresent(Bool.self, forKey: .unloadInBackground) ?? d.unloadInBackground
+        ttsAuto = try c.decodeIfPresent(Bool.self, forKey: .ttsAuto) ?? d.ttsAuto
         ttsVoice = try c.decodeIfPresent(String.self, forKey: .ttsVoice)
-        ttsRate = try c.decodeIfPresent(Double.self, forKey: .ttsRate) ?? 0.5
-        wifiOnly = try c.decodeIfPresent(Bool.self, forKey: .wifiOnly) ?? true
-        fontDesign = try c.decodeIfPresent(Int.self, forKey: .fontDesign) ?? 0
-        thinkDisplay = try c.decodeIfPresent(Int.self, forKey: .thinkDisplay) ?? 0
-        reasoningEnabled = try c.decodeIfPresent(Bool.self, forKey: .reasoningEnabled) ?? true
-        interfaceFontScale = try c.decodeIfPresent(Double.self, forKey: .interfaceFontScale) ?? 1.0
-        bubbleMode = try c.decodeIfPresent(Int.self, forKey: .bubbleMode) ?? 1
-        bubbleColor = try c.decodeIfPresent(Int.self, forKey: .bubbleColor) ?? 0
-        liteStream = try c.decodeIfPresent(Bool.self, forKey: .liteStream) ?? true
+        ttsRate = try c.decodeIfPresent(Double.self, forKey: .ttsRate) ?? d.ttsRate
+        wifiOnly = try c.decodeIfPresent(Bool.self, forKey: .wifiOnly) ?? d.wifiOnly
+        fontDesign = try c.decodeIfPresent(Int.self, forKey: .fontDesign) ?? d.fontDesign
+        thinkDisplay = try c.decodeIfPresent(Int.self, forKey: .thinkDisplay) ?? d.thinkDisplay
+        reasoningEnabled = try c.decodeIfPresent(Bool.self, forKey: .reasoningEnabled) ?? d.reasoningEnabled
+        interfaceFontScale = try c.decodeIfPresent(Double.self, forKey: .interfaceFontScale) ?? d.interfaceFontScale
+        bubbleMode = try c.decodeIfPresent(Int.self, forKey: .bubbleMode) ?? d.bubbleMode
+        bubbleColor = try c.decodeIfPresent(Int.self, forKey: .bubbleColor) ?? d.bubbleColor
+        liteStream = try c.decodeIfPresent(Bool.self, forKey: .liteStream) ?? d.liteStream
     }
 }
 
@@ -241,9 +248,14 @@ extension VM {
         )) ?? []
         let files = items.filter { ["md", "markdown", "txt"].contains($0.pathExtension.lowercased()) }
         var seen = Set<String>()
+        var present = Set<String>()
         var changed = false
 
         for url in files {
+            // Taille vérifiée avant lecture : un gros fichier n'est jamais chargé en mémoire.
+            let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            present.insert("file:" + url.lastPathComponent)
+            guard fileSize <= 64 * 1024 else { continue }
             guard let data = try? Data(contentsOf: url), data.count <= 64 * 1024,
                   let text = String(data: data, encoding: .utf8),
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
@@ -277,7 +289,8 @@ extension VM {
         }
 
         let before = skills.count
-        skills.removeAll { $0.id.hasPrefix("file:") && !seen.contains($0.id) }
+        // Une compétence dont le fichier existe encore (même momentanément illisible) n'est pas supprimée.
+        skills.removeAll { $0.id.hasPrefix("file:") && !seen.contains($0.id) && !present.contains($0.id) }
         if skills.count != before { changed = true }
         if changed { saveSkills() }
     }
